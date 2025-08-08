@@ -116,6 +116,57 @@ class FinnhubAPI:
                 logger.error(f"API request failed for '{query}': {error_msg}")
             return []
     
+    def name_lookup(self, symbol: str) -> Optional[str]:
+        """
+        Look up company name based on symbol
+        
+        Args:
+            symbol: Stock symbol (e.g., 'AAPL')
+            
+        Returns:
+            Company name if found, None otherwise
+        """
+        if not symbol or len(symbol.strip()) < 1:
+            return None
+        
+        symbol = symbol.strip().upper()
+        logger.info(f"Looking up name for symbol: '{symbol}'")
+        
+        try:
+            # Use symbol lookup with the symbol itself as query
+            # This often returns the company associated with that symbol
+            results = self.symbol_lookup(symbol)
+            
+            if results:
+                # Look for exact symbol match
+                for result in results:
+                    result_symbol = result.get('symbol', '').upper()
+                    # Remove exchange suffix for comparison (e.g., 'AAPL.US' -> 'AAPL')
+                    clean_result_symbol = result_symbol.split('.')[0]
+                    clean_input_symbol = symbol.split('.')[0]
+                    
+                    if clean_result_symbol == clean_input_symbol:
+                        company_name = result.get('description', '')
+                        if company_name:
+                            logger.info(f"✓ Name lookup success: '{symbol}' → '{company_name}'")
+                            return company_name
+                
+                # If no exact match, try the first result that contains the symbol
+                for result in results:
+                    result_symbol = result.get('symbol', '').upper()
+                    if symbol in result_symbol or result_symbol.startswith(symbol):
+                        company_name = result.get('description', '')
+                        if company_name:
+                            logger.info(f"✓ Partial name lookup success: '{symbol}' → '{company_name}'")
+                            return company_name
+            
+            logger.warning(f"❌ Name lookup failed for symbol: '{symbol}'")
+            return None
+            
+        except Exception as e:
+            logger.error(f"Name lookup failed for '{symbol}': {str(e)}")
+            return None
+    
     def _clean_company_name(self, name: str) -> str:
         """Clean company name for better API search results"""
         if not name:
@@ -339,24 +390,39 @@ class SymbolEnricher:
         
     def enrich_portfolio(self, portfolio_data: List[PortfolioData]) -> Tuple[List[PortfolioData], Dict]:
         """
-        Enrich portfolio data by looking up missing symbols
+        Enrich portfolio data by looking up missing symbols or names
         
         Returns:
             Tuple of (enriched_portfolio_data, enrichment_stats)
         """
         logger.info("Starting portfolio enrichment...")
         
+        # Filter out entries with neither name nor symbol
+        valid_entries = [item for item in portfolio_data if item.name or item.symbol]
+        invalid_entries = [item for item in portfolio_data if not item.name and not item.symbol]
+        
+        if invalid_entries:
+            logger.warning(f"Ignoring {len(invalid_entries)} entries with neither name nor symbol")
+            for item in invalid_entries:
+                logger.warning(f"  - Skipped entry: Price=${item.price}, Shares={item.shares}, Market Value=${item.market_value}")
+        
         enrichment_stats = {
             "total_entries": len(portfolio_data),
-            "attempted_lookups": 0,
-            "successful_lookups": 0,
-            "failed_lookups": 0,
+            "valid_entries": len(valid_entries),
+            "invalid_entries_skipped": len(invalid_entries),
+            "attempted_symbol_lookups": 0,
+            "attempted_name_lookups": 0,
+            "successful_symbol_lookups": 0,
+            "successful_name_lookups": 0,
+            "failed_symbol_lookups": 0,
+            "failed_name_lookups": 0,
             "already_complete": 0
         }
         
-        for item in portfolio_data:
+        for item in valid_entries:
             if item.needs_symbol_lookup():
-                enrichment_stats["attempted_lookups"] += 1
+                # Handle entries with name but no symbol
+                enrichment_stats["attempted_symbol_lookups"] += 1
                 
                 # Try direct lookup first
                 match = self.finnhub.find_best_match(item.name)
@@ -364,8 +430,8 @@ class SymbolEnricher:
                 if match:
                     item.symbol = match['symbol']
                     item.enriched = True
-                    enrichment_stats["successful_lookups"] += 1
-                    logger.info(f"✓ Direct match: '{item.name}' → {item.symbol}")
+                    enrichment_stats["successful_symbol_lookups"] += 1
+                    logger.info(f"✓ Symbol lookup: '{item.name}' → {item.symbol}")
                 else:
                     # LLM fallback - try name variations
                     logger.info(f"🤖 Trying LLM fallback for '{item.name}'")
@@ -374,21 +440,43 @@ class SymbolEnricher:
                     if match:
                         item.symbol = match['symbol']
                         item.enriched = True
-                        enrichment_stats["successful_lookups"] += 1
-                        logger.info(f"✓ LLM fallback success: '{item.name}' → {item.symbol}")
+                        enrichment_stats["successful_symbol_lookups"] += 1
+                        logger.info(f"✓ LLM symbol lookup: '{item.name}' → {item.symbol}")
                     else:
-                        enrichment_stats["failed_lookups"] += 1
-                        logger.warning(f"✗ All methods failed for '{item.name}'")
+                        enrichment_stats["failed_symbol_lookups"] += 1
+                        logger.warning(f"✗ Symbol lookup failed for '{item.name}'")
+                        
+            elif item.needs_name_lookup():
+                # Handle entries with symbol but no name
+                enrichment_stats["attempted_name_lookups"] += 1
+                
+                # Try name lookup
+                company_name = self.finnhub.name_lookup(item.symbol)
+                
+                if company_name:
+                    item.name = company_name
+                    item.enriched = True
+                    enrichment_stats["successful_name_lookups"] += 1
+                    logger.info(f"✓ Name lookup: '{item.symbol}' → {item.name}")
+                else:
+                    enrichment_stats["failed_name_lookups"] += 1
+                    logger.warning(f"✗ Name lookup failed for '{item.symbol}'")
                     
             elif item.symbol and item.name:
                 enrichment_stats["already_complete"] += 1
         
-        success_rate = (enrichment_stats["successful_lookups"] / 
-                       max(enrichment_stats["attempted_lookups"], 1)) * 100
+        total_attempted = (enrichment_stats["attempted_symbol_lookups"] + 
+                          enrichment_stats["attempted_name_lookups"])
+        total_successful = (enrichment_stats["successful_symbol_lookups"] + 
+                           enrichment_stats["successful_name_lookups"])
         
-        logger.info(f"Enrichment completed - Success rate: {success_rate:.1f}%")
+        success_rate = (total_successful / max(total_attempted, 1)) * 100
         
-        return portfolio_data, enrichment_stats
+        logger.info(f"Enrichment completed - Overall success rate: {success_rate:.1f}%")
+        logger.info(f"  - Symbol lookups: {enrichment_stats['successful_symbol_lookups']}/{enrichment_stats['attempted_symbol_lookups']}")
+        logger.info(f"  - Name lookups: {enrichment_stats['successful_name_lookups']}/{enrichment_stats['attempted_name_lookups']}")
+        
+        return valid_entries, enrichment_stats
     
     def _try_llm_fallback(self, company_name: str) -> Optional[Dict]:
         """
@@ -647,19 +735,28 @@ def main():
         print(f"  - Missing names: {metadata['missing_names']}")
         print(f"  - Complete entries: {metadata['complete_entries']}")
         
-        # Step 2: Enrich missing symbols
-        if metadata['missing_symbols'] > 0:
-            print(f"\n🔍 Step 2: Looking up {metadata['missing_symbols']} missing symbols...")
+        # Step 2: Enrich missing symbols and names
+        missing_data = metadata['missing_symbols'] + metadata['missing_names']
+        if missing_data > 0:
+            print(f"\n🔍 Step 2: Looking up {metadata['missing_symbols']} missing symbols and {metadata['missing_names']} missing names...")
             enriched_data, enrich_stats = enricher.enrich_portfolio(portfolio_data)
             
-            print(f"✓ Symbol lookup completed")
-            print(f"  - Successful lookups: {enrich_stats['successful_lookups']}")
-            print(f"  - Failed lookups: {enrich_stats['failed_lookups']}")
-            print(f"  - Success rate: {(enrich_stats['successful_lookups']/max(enrich_stats['attempted_lookups'],1)*100):.1f}%")
+            print(f"✓ Enrichment completed")
+            print(f"  - Valid entries processed: {enrich_stats['valid_entries']}")
+            print(f"  - Invalid entries skipped: {enrich_stats['invalid_entries_skipped']}")
+            print(f"  - Successful symbol lookups: {enrich_stats['successful_symbol_lookups']}")
+            print(f"  - Failed symbol lookups: {enrich_stats['failed_symbol_lookups']}")
+            print(f"  - Successful name lookups: {enrich_stats['successful_name_lookups']}")
+            print(f"  - Failed name lookups: {enrich_stats['failed_name_lookups']}")
+            
+            total_attempted = enrich_stats['attempted_symbol_lookups'] + enrich_stats['attempted_name_lookups']
+            total_successful = enrich_stats['successful_symbol_lookups'] + enrich_stats['successful_name_lookups']
+            success_rate = (total_successful/max(total_attempted,1)*100) if total_attempted > 0 else 100
+            print(f"  - Overall success rate: {success_rate:.1f}%")
         else:
-            print("\n✓ Step 2: No missing symbols to lookup")
+            print("\n✓ Step 2: No missing data to lookup")
             enriched_data = portfolio_data
-            enrich_stats = {"successful_lookups": 0, "failed_lookups": 0}
+            enrich_stats = {"successful_symbol_lookups": 0, "failed_symbol_lookups": 0, "successful_name_lookups": 0, "failed_name_lookups": 0}
         
         # Step 3: Export enriched data
         print(f"\n💾 Step 3: Exporting enriched data...")

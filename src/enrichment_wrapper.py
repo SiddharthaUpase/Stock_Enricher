@@ -54,34 +54,35 @@ class EnrichmentWrapper:
                 "failed": 0
             })
             
-            # Step 2: Enrich symbols with progress tracking
+            # Step 2: Enrich both symbols and names with progress tracking
             successful_lookups = 0
             failed_lookups = 0
             
             for i, item in enumerate(portfolio_data):
+                progress_percentage = 10 + (i / total_companies) * 80  # 10% to 90%
+                
                 if item.needs_symbol_lookup():
-                    # Update progress
-                    progress_percentage = 10 + (i / total_companies) * 80  # 10% to 90%
+                    # Handle entries with name but no symbol
                     progress_callback(task_id, {
                         "processed": i,
                         "total": total_companies,
                         "percentage": progress_percentage,
                         "current_company": item.name,
-                        "message": f"Processing {item.name}...",
+                        "message": f"Looking up symbol for {item.name}...",
                         "successful": successful_lookups,
                         "failed": failed_lookups
                     })
                     
-                    # Try direct lookup first (your existing logic)
+                    # Try direct lookup first
                     match = self.enricher.finnhub.find_best_match(item.name)
                     
                     if match:
                         item.symbol = match['symbol']
                         item.enriched = True
                         successful_lookups += 1
-                        logger.info(f"Task {task_id}: ✓ Direct match: '{item.name}' → {item.symbol}")
+                        logger.info(f"Task {task_id}: ✓ Symbol lookup: '{item.name}' → {item.symbol}")
                     else:
-                        # LLM fallback (your existing logic)
+                        # LLM fallback
                         logger.info(f"Task {task_id}: 🤖 Trying LLM fallback for '{item.name}'")
                         match = self.enricher._try_llm_fallback(item.name)
                         
@@ -89,19 +90,43 @@ class EnrichmentWrapper:
                             item.symbol = match['symbol']
                             item.enriched = True
                             successful_lookups += 1
-                            logger.info(f"Task {task_id}: ✓ LLM fallback success: '{item.name}' → {item.symbol}")
+                            logger.info(f"Task {task_id}: ✓ LLM symbol lookup: '{item.name}' → {item.symbol}")
                         else:
                             failed_lookups += 1
-                            logger.warning(f"Task {task_id}: ✗ All methods failed for '{item.name}'")
-                else:
-                    # Company already has symbol
-                    progress_percentage = 10 + (i / total_companies) * 80
+                            logger.warning(f"Task {task_id}: ✗ Symbol lookup failed for '{item.name}'")
+                            
+                elif item.needs_name_lookup():
+                    # Handle entries with symbol but no name
                     progress_callback(task_id, {
                         "processed": i,
                         "total": total_companies,
                         "percentage": progress_percentage,
-                        "current_company": item.name,
-                        "message": f"Skipping {item.name} (already has symbol)",
+                        "current_company": item.symbol,
+                        "message": f"Looking up name for {item.symbol}...",
+                        "successful": successful_lookups,
+                        "failed": failed_lookups
+                    })
+                    
+                    # Try name lookup
+                    company_name = self.enricher.finnhub.name_lookup(item.symbol)
+                    
+                    if company_name:
+                        item.name = company_name
+                        item.enriched = True
+                        successful_lookups += 1
+                        logger.info(f"Task {task_id}: ✓ Name lookup: '{item.symbol}' → {item.name}")
+                    else:
+                        failed_lookups += 1
+                        logger.warning(f"Task {task_id}: ✗ Name lookup failed for '{item.symbol}'")
+                        
+                else:
+                    # Entry already has both name and symbol, or skip if invalid
+                    progress_callback(task_id, {
+                        "processed": i,
+                        "total": total_companies,
+                        "percentage": progress_percentage,
+                        "current_company": item.name or item.symbol,
+                        "message": f"Skipping {item.name or item.symbol} (already complete)",
                         "successful": successful_lookups,
                         "failed": failed_lookups
                     })
@@ -127,7 +152,8 @@ class EnrichmentWrapper:
             csv_string = self._convert_to_csv_string(entries_with_symbols)
             
             # Final progress update
-            success_rate = (successful_lookups / max(len([item for item in portfolio_data if item.needs_symbol_lookup()]), 1)) * 100
+            total_attempted = len([item for item in portfolio_data if item.needs_symbol_lookup() or item.needs_name_lookup()])
+            success_rate = (successful_lookups / max(total_attempted, 1)) * 100
             
             progress_callback(task_id, {
                 "processed": total_companies,
