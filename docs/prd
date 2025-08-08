@@ -1,0 +1,64 @@
+Finding missing tickers using names  - AI Coding
+
+
+ Objective
+Become a master of "Vibe Coding" by enriching partial financial datasets using modern Python tooling and APIs. The goal of this exercise is to see how you build with AI. After you complete it, I’d love to chat about what you learned and walk through your workflow. It’d be awesome if you used a multi-threaded approach — with multiple AI agents coding different parts for you.
+AI tools:
+Conductor.build + Claude Code
+OR
+Amp Code
+Example:
+https://www.reddit.com/r/ClaudeAI/comments/1l11fo2/how_i_built_a_multiagent_orchestration_system/
+
+
+Your task is to take a spreadsheet of portfolio holdings, enrich any rows missing a ticker symbol by looking them up via the Finnhub API, and store the updated data.
+You can create a CSV file with a single sheet. Each row represents a security holding with the following columns:
+Name (e.g., "Apple Inc.")
+Symbol (e.g., "AAPL") — may be empty
+Price
+# of Shares
+Market Value
+Some rows will have valid ticker symbols; others will not. Some might only have symbols without a description. Your job is to fill in the blanks where possible.
+
+
+
+
+
+
+✅ Core Task
+Load and parse the Excel file using Python.
+
+
+For each row with a missing or blank ticker symbol:
+
+
+Use the Finnhub API or other financial api to attempt to look up the correct symbol using the company name.
+
+
+If found, populate the symbol.
+
+
+Store the enriched data (with added tickers) in a new CSV file.
+UI is a plus!
+
+
+🔒 API Usage
+You may use any free-tier or demo access provided by Finnhub or another API of your choice.
+
+
+Handle API rate limits and edge cases gracefully (e.g. ambiguous results, not found, errors).
+
+Example Dataset
+Name,Symbol,Price,# of Shares,Market Value
+Apple Inc.,AAPL,189.89,10,1898.90
+Microsoft Corporation,,326.12,5,1630.60
+Berkshire Hathaway Inc. Class B,,362.55,2,725.10
+Amazon.com Inc.,AMZN,130.25,8,1042.00
+Alphabet Inc. Class A,,139.14,6,834.84
+Tesla Inc,,255.25,3,765.75
+NVIDIA Corporation,NVDA,470.11,4,1880.44
+Unknown Tech Co,,12.00,100,1200.00
+,GOOGL,139.14,5,695.70
+,TSLA,255.25,4,1021.00
+
+Please create more datasets to help you thoroughly test
