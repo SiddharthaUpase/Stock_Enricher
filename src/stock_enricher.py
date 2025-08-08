@@ -56,7 +56,7 @@ class FinnhubAPI:
     def __init__(self, api_key: str = ""):
         self.client = finnhub.Client(api_key=os.getenv("FINNHUB_API_KEY"))
         self.last_request_time = 0
-        self.min_request_interval = 0.5  # 0.5 second between requests to avoid rate limits
+        self.min_request_interval = 1  # 1 second between requests to avoid rate limits
         self.rate_limit_hit = False
         
     def _rate_limit(self):
