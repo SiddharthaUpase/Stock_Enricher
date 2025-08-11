@@ -6,7 +6,7 @@ import time
 import re
 from typing import Optional, Dict, List, Tuple
 from pathlib import Path
-from src.llm_name_generator import LLMNameGenerator
+
 from dotenv import load_dotenv
 import os
 
@@ -192,193 +192,258 @@ class FinnhubAPI:
     
     def find_best_match(self, query: str) -> Optional[Dict]:
         """
-        Find the best matching symbol for a company name
+        Find the best matching symbol for a company name using deterministic algorithm
         
         Returns:
             Best match dictionary with symbol info, or None if no good match
         """
-        results = self.symbol_lookup(query)
+        logger.info(f"🎯 Starting deterministic lookup for: '{query}'")
         
-        if not results:
-            logger.error(f"❌ LOOKUP FAILED for '{query}': No API results returned")
-            return None
+        # Step 1: Convert to Finnhub format
+        finnhub_format = self._convert_to_finnhub_format(query)
+        logger.info(f"📝 CSV Format: '{query}' → Finnhub Format: '{finnhub_format}'")
         
-        # Score results based on relevance
-        scored_results = []
-        query_lower = query.lower()
+        # Step 2: Generate search variations
+        variations = self._generate_search_variations(finnhub_format)
+        logger.info(f"🔄 Generated {len(variations)} search variations: {variations}")
         
-        for result in results:
-            score = self._calculate_match_score(query_lower, result)
-            scored_results.append((score, result))
+        # Step 3: Handle Class A/B/C companies specially
+        best_match = None
         
-        # Sort by score (highest first)
-        scored_results.sort(key=lambda x: x[0], reverse=True)
+        if 'class' in query.lower():
+            logger.info("🎯 Class A/B/C company detected - searching for base company first")
+            best_match = self._handle_class_company(query, finnhub_format)
+        else:
+            # Regular company - try variations normally
+            best_match = self._search_variations(variations, finnhub_format)
         
-        # Return best match if score is good enough
-        best_score, best_match = scored_results[0]
-        
-        if best_score > 0.3:  # Minimum confidence threshold
-            logger.info(f"✓ Best match for '{query}': {best_match['symbol']} ({best_match['description']}) - Score: {best_score:.2f}")
+        if best_match:
+            logger.info(f"✅ SUCCESS: '{query}' → {best_match['symbol']} ({best_match.get('description', 'N/A')})")
             return best_match
         else:
-            # Detailed failure analysis
-            self._log_detailed_failure_analysis(query, scored_results)
+            logger.error(f"❌ FAILED: No reliable match found for '{query}'")
             return None
     
-    def _log_detailed_failure_analysis(self, query: str, scored_results: List[Tuple[float, Dict]]):
-        """Log detailed analysis of why a lookup failed"""
-        logger.error(f"\n❌ DETAILED FAILURE ANALYSIS for '{query}':")
-        logger.error(f"   Original query: '{query}'")
-        logger.error(f"   Cleaned query: '{self._clean_company_name(query)}'")
-        logger.error(f"   Number of API results: {len(scored_results)}")
-        logger.error(f"   Confidence threshold: 0.3")
-        
-        if scored_results:
-            logger.error(f"   TOP 3 RESULTS WITH SCORES:")
-            for i, (score, result) in enumerate(scored_results[:3]):
-                symbol = result.get('symbol', 'N/A')
-                description = result.get('description', 'N/A')
-                result_type = result.get('type', 'N/A')
-                logger.error(f"     #{i+1}: {symbol:8} | {description:30} | Type: {result_type:15} | Score: {score:.3f}")
-            
-            # Show why the best match failed
-            best_score, best_result = scored_results[0]
-            logger.error(f"   BEST MATCH ANALYSIS:")
-            logger.error(f"     Symbol: {best_result.get('symbol', 'N/A')}")
-            logger.error(f"     Description: {best_result.get('description', 'N/A')}")
-            logger.error(f"     Score: {best_score:.3f} (needed: 0.3)")
-            logger.error(f"     Failure reason: Score below confidence threshold")
-            
-            # Show detailed scoring breakdown
-            self._log_scoring_breakdown(query, best_result, best_score)
-        else:
-            logger.error(f"   No results returned from API")
+
     
-    def _log_scoring_breakdown(self, query: str, result: Dict, total_score: float):
-        """Log detailed breakdown of how the score was calculated"""
-        query_lower = query.lower()
-        description = result.get('description', '').lower()
-        symbol = result.get('symbol', '').lower()
+    def _convert_to_finnhub_format(self, csv_name: str) -> str:
+        """
+        Convert CSV company name to Finnhub description format
+        Examples:
+        "Apple Inc." → "APPLE INC"
+        "Microsoft Corporation" → "MICROSOFT CORP" 
+        "Berkshire Hathaway Inc. Class B" → "BERKSHIRE HATHAWAY INC-CL B"
+        """
+        if not csv_name:
+            return ""
         
-        logger.error(f"   SCORING BREAKDOWN:")
-        logger.error(f"     Query: '{query_lower}'")
-        logger.error(f"     Description: '{description}'")
+        converted = csv_name.strip()
         
-        # Exact match analysis
-        if query_lower == description:
-            logger.error(f"     ✓ Exact match: +1.0")
-        elif query_lower in description:
-            logger.error(f"     ✓ Query in description: +0.8")
-        elif description.startswith(query_lower):
-            logger.error(f"     ✓ Description starts with query: +0.7")
-        else:
-            logger.error(f"     ✗ No exact/substring match: +0.0")
+        # Step 1: Convert to uppercase
+        converted = converted.upper()
         
-        # Word match analysis
-        query_words = set(query_lower.split())
-        description_words = set(description.split())
-        matching_words = query_words & description_words
+        # Step 2: Handle Class A/B/C patterns
+        # "Class A/B/C" → "-CL A/B/C"
+        converted = re.sub(r'\s+CLASS\s+([ABC])', r'-CL \1', converted, flags=re.IGNORECASE)
         
-        if query_words:
-            word_match_ratio = len(matching_words) / len(query_words)
-            logger.error(f"     Word overlap: {len(matching_words)}/{len(query_words)} = {word_match_ratio:.2f} → +{word_match_ratio * 0.6:.3f}")
-            logger.error(f"       Query words: {query_words}")
-            logger.error(f"       Description words: {description_words}")
-            logger.error(f"       Matching words: {matching_words}")
+        # Step 3: Normalize common suffixes
+        # "Inc." → "INC"
+        converted = re.sub(r'\bINC\.', 'INC', converted)
+        # "Corp." → "CORP"
+        converted = re.sub(r'\bCORP\.', 'CORP', converted)
+        # "Corporation" → "CORP"
+        converted = re.sub(r'\bCORPORATION\b', 'CORP', converted)
+        # "Co." → "CO"
+        converted = re.sub(r'\bCO\.', 'CO', converted)
+        # "Company" → "CO"
+        converted = re.sub(r'\bCOMPANY\b', 'CO', converted)
+        # "Ltd." → "LTD"
+        converted = re.sub(r'\bLTD\.', 'LTD', converted)
+        # "Limited" → "LTD"
+        converted = re.sub(r'\bLIMITED\b', 'LTD', converted)
         
-        # Acronym analysis
-        acronym_score = self._calculate_acronym_score(query_lower, description, result.get('symbol', ''))
-        if acronym_score > 0:
-            logger.error(f"     ✓ Acronym match bonus: +{acronym_score:.3f}")
-        else:
-            logger.error(f"     ✗ No acronym match: +0.0")
+        # Step 4: Clean up extra spaces
+        converted = re.sub(r'\s+', ' ', converted).strip()
         
-        # Bonus points
-        if result.get('symbol', '').endswith('.US') or '.' not in result.get('symbol', ''):
-            logger.error(f"     ✓ US exchange bonus: +0.1")
-        else:
-            logger.error(f"     ✗ Non-US exchange: +0.0")
+        return converted
+    
+    def _generate_search_variations(self, finnhub_format: str) -> List[str]:
+        """Generate search variations for better matching"""
+        variations = []
+        
+        # 1. Try the exact Finnhub format
+        variations.append(finnhub_format)
+        
+        # 2. Try without common suffixes (often works better for search)
+        without_suffix = finnhub_format
+        suffixes = ['INC', 'CORP', 'CO', 'LTD', 'LLC']
+        
+        for suffix in suffixes:
+            pattern = rf'\s+{suffix}$'
+            if re.search(pattern, without_suffix, re.IGNORECASE):
+                without_suffix = re.sub(pattern, '', without_suffix, flags=re.IGNORECASE).strip()
+                variations.append(without_suffix)
+                break  # Only remove one suffix
+        
+        # 3. Try title case version (mixed case often works better)
+        title_case = ' '.join(word.capitalize() for word in without_suffix.split())
+        
+        if title_case != without_suffix and title_case != finnhub_format:
+            variations.append(title_case)
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_variations = []
+        for variation in variations:
+            if variation not in seen:
+                seen.add(variation)
+                unique_variations.append(variation)
+        
+        return unique_variations
+    
+    def _search_variations(self, variations: List[str], finnhub_format: str) -> Optional[Dict]:
+        """Search through variations to find the best match"""
+        for i, variation in enumerate(variations):
+            logger.info(f"🔍 Testing variation {i + 1}: '{variation}'")
             
-        if result.get('type', '').lower() == 'common stock':
-            logger.error(f"     ✓ Common stock bonus: +0.1")
-        else:
-            logger.error(f"     ✗ Not common stock: +0.0")
+            try:
+                results = self.symbol_lookup(variation)
+                
+                if not results:
+                    logger.info(f"   ❌ No results")
+                    continue
+                
+                logger.info(f"   ✅ Found {len(results)} results:")
+                for j, result in enumerate(results):
+                    description = result.get('description', 'N/A')
+                    symbol = result.get('symbol', 'N/A')
+                    result_type = result.get('type', 'N/A')
+                    logger.info(f"      {j + 1}. {symbol} - {description} (Type: {result_type})")
+                    
+                    # Check for exact description match
+                    if description == finnhub_format:
+                        logger.info(f"         🎯 EXACT MATCH with Finnhub format!")
+                        return result
+                
+                # If we found results, use the first one as best match if no exact match
+                if results:
+                    best_match = results[0]
+                    logger.info(f"      📌 Using first result as best match")
+                    return best_match
+                
+            except Exception as e:
+                logger.error(f"   ❌ API Error: {str(e)}")
+                continue
+            
+            # Rate limiting between variations
+            if i < len(variations) - 1:
+                time.sleep(0.3)
         
-        logger.error(f"     TOTAL SCORE: {total_score:.3f}")
-        logger.error(f"")  # Empty line for readability
+        return None
     
-    def _calculate_match_score(self, query: str, result: Dict) -> float:
-        """Calculate match score between query and result"""
-        description = result.get('description', '').lower()
-        symbol = result.get('symbol', '').lower()
+    def _handle_class_company(self, csv_name: str, finnhub_format: str) -> Optional[Dict]:
+        """Handle Class A/B/C companies by searching for base company first"""
+        # Extract base company name (remove Class A/B/C)
+        base_company = re.sub(r'\s+Class\s+[ABC]', '', csv_name, flags=re.IGNORECASE).strip()
+        base_variations = self._generate_search_variations(self._convert_to_finnhub_format(base_company))
         
-        score = 0.0
+        logger.info(f"   📝 Base company: '{base_company}'")
+        logger.info(f"   🔄 Base variations: {base_variations}")
         
-        # Exact matches get highest score
-        if query == description:
-            score += 1.0
-        elif query in description:
-            score += 0.8
-        elif description.startswith(query):
-            score += 0.7
+        # Search for base company
+        best_match = None
+        for base_variation in base_variations:
+            logger.info(f"   🔍 Searching base: '{base_variation}'")
+            
+            try:
+                results = self.symbol_lookup(base_variation)
+                
+                if results:
+                    best_match = results[0]
+                    logger.info(f"   ✅ Found base company: {best_match['symbol']} - {best_match.get('description', 'N/A')}")
+                    break
+                else:
+                    logger.info(f"   ❌ No results for base variation")
+                
+                time.sleep(0.3)
+            except Exception as e:
+                logger.error(f"   ❌ Error: {str(e)}")
         
-        # Check for word matches
-        query_words = set(query.split())
-        description_words = set(description.split())
+        if not best_match:
+            return None
         
-        if query_words:
-            word_match_ratio = len(query_words & description_words) / len(query_words)
-            score += word_match_ratio * 0.6
+        # Handle Class A/B/C transformation if needed
+        requested_class = None
+        if 'class a' in csv_name.lower():
+            requested_class = 'A'
+        elif 'class b' in csv_name.lower():
+            requested_class = 'B'
+        elif 'class c' in csv_name.lower():
+            requested_class = 'C'
         
-        # NEW: Check for acronym matches
-        acronym_score = self._calculate_acronym_score(query, description, symbol)
-        score += acronym_score
+        if requested_class:
+            logger.info(f"🔄 Class {requested_class} detected, checking symbol transformation...")
+            logger.info(f"   Found symbol: {best_match['symbol']}")
+            
+            # Transform symbol if needed
+            target_symbol = best_match['symbol']
+            needs_transformation = False
+            
+            # Handle different class transformations
+            if requested_class == 'B' and best_match['symbol'].endswith('.A'):
+                target_symbol = best_match['symbol'].replace('.A', '.B')
+                needs_transformation = True
+            elif requested_class == 'A' and best_match['symbol'].endswith('.B'):
+                target_symbol = best_match['symbol'].replace('.B', '.A')
+                needs_transformation = True
+            elif requested_class == 'C':
+                # For Class C, try common patterns (like GOOGL → GOOG for Alphabet)
+                if best_match['symbol'] == 'GOOGL':
+                    target_symbol = 'GOOG'
+                    needs_transformation = True
+                else:
+                    # Try adding .C suffix for other companies
+                    base_symbol = re.sub(r'\.[AB]$', '', best_match['symbol'])
+                    target_symbol = base_symbol + '.C'
+                    needs_transformation = True
+            
+            if needs_transformation:
+                logger.info(f"   🔄 Transforming: {best_match['symbol']} → {target_symbol}")
+                
+                # Verify the transformed symbol exists
+                time.sleep(0.5)
+                logger.info(f"   🔍 Verifying transformed symbol...")
+                
+                try:
+                    # Use company profile to verify the symbol exists
+                    profile = self._get_company_profile(target_symbol)
+                    if profile and profile.get('name'):
+                        logger.info(f"   ✅ Verified: {target_symbol} - {profile['name']}")
+                        # Create new result with transformed symbol
+                        transformed_match = best_match.copy()
+                        transformed_match['symbol'] = target_symbol
+                        return transformed_match
+                    else:
+                        logger.info(f"   ❌ Transformed symbol not found, keeping original")
+                        return best_match
+                except Exception as e:
+                    logger.error(f"   ❌ Verification error: {str(e)}")
+                    return best_match
+            else:
+                logger.info(f"   ✅ No transformation needed")
+                return best_match
         
-        # Prefer US exchange symbols
-        if result.get('symbol', '').endswith('.US') or '.' not in result.get('symbol', ''):
-            score += 0.1
-        
-        # Prefer common stock
-        if result.get('type', '').lower() == 'common stock':
-            score += 0.1
-        
-        return score
+        return best_match
     
-    def _calculate_acronym_score(self, query: str, description: str, symbol: str) -> float:
-        """Calculate additional score for acronym matches"""
-        
-        # Check if query matches symbol (case insensitive)
-        if query.upper() == symbol.upper():
-            # Check if the symbol could be an acronym of the description
-            desc_words = description.split()
-            if len(desc_words) >= 2:
-                # Create acronym from first letters of description words
-                potential_acronym = ''.join(word[0] for word in desc_words if word).upper()
-                
-                if query.upper() == potential_acronym:
-                    return 0.5  # Strong acronym match
-                
-                # Also check if query matches major words (skip common words)
-                major_words = [word for word in desc_words if len(word) > 2 and word.lower() not in ['inc', 'corp', 'company', 'ltd', 'the', 'and', 'of']]
-                if len(major_words) >= 2:
-                    major_acronym = ''.join(word[0] for word in major_words).upper()
-                    if query.upper() == major_acronym:
-                        return 0.4  # Good acronym match
-        
-        # Check if description words start with query letters
-        if len(query) >= 2:
-            desc_words = description.split()
-            if len(desc_words) >= len(query):
-                # Check if each letter of query matches first letter of description words
-                matches = 0
-                for i, letter in enumerate(query.lower()):
-                    if i < len(desc_words) and desc_words[i].lower().startswith(letter):
-                        matches += 1
-                
-                if matches == len(query) and matches >= 2:
-                    return 0.3  # Partial acronym match
-        
-        return 0.0
+    def _get_company_profile(self, symbol: str) -> Optional[Dict]:
+        """Get company profile for symbol verification"""
+        try:
+            self._rate_limit()
+            profile = self.client.company_profile2(symbol=symbol)
+            return profile
+        except Exception as e:
+            logger.error(f"Profile lookup failed for '{symbol}': {str(e)}")
+            return None
 
 class SymbolEnricher:
     """Main class for enriching portfolio data with missing symbols"""
@@ -386,7 +451,6 @@ class SymbolEnricher:
     def __init__(self, api_key: str = "d2aps11r01qgk9ug3ie0d2aps11r01qgk9ug3ieg"):
         self.csv_reader = CSVReader()
         self.finnhub = FinnhubAPI(api_key)
-        self.llm_generator = LLMNameGenerator()
         
     def enrich_portfolio(self, portfolio_data: List[PortfolioData]) -> Tuple[List[PortfolioData], Dict]:
         """
@@ -424,7 +488,7 @@ class SymbolEnricher:
                 # Handle entries with name but no symbol
                 enrichment_stats["attempted_symbol_lookups"] += 1
                 
-                # Try direct lookup first
+                # Use deterministic lookup algorithm
                 match = self.finnhub.find_best_match(item.name)
                 
                 if match:
@@ -433,18 +497,8 @@ class SymbolEnricher:
                     enrichment_stats["successful_symbol_lookups"] += 1
                     logger.info(f"✓ Symbol lookup: '{item.name}' → {item.symbol}")
                 else:
-                    # LLM fallback - try name variations
-                    logger.info(f"🤖 Trying LLM fallback for '{item.name}'")
-                    match = self._try_llm_fallback(item.name)
-                    
-                    if match:
-                        item.symbol = match['symbol']
-                        item.enriched = True
-                        enrichment_stats["successful_symbol_lookups"] += 1
-                        logger.info(f"✓ LLM symbol lookup: '{item.name}' → {item.symbol}")
-                    else:
-                        enrichment_stats["failed_symbol_lookups"] += 1
-                        logger.warning(f"✗ Symbol lookup failed for '{item.name}'")
+                    enrichment_stats["failed_symbol_lookups"] += 1
+                    logger.warning(f"✗ Symbol lookup failed for '{item.name}'")
                         
             elif item.needs_name_lookup():
                 # Handle entries with symbol but no name
@@ -478,41 +532,7 @@ class SymbolEnricher:
         
         return valid_entries, enrichment_stats
     
-    def _try_llm_fallback(self, company_name: str) -> Optional[Dict]:
-        """
-        Try LLM-generated name variations as fallback
-        
-        Args:
-            company_name: Original company name that failed direct lookup
-            
-        Returns:
-            Match dictionary if found, None otherwise
-        """
-        try:
-            # Generate variations using LLM
-            variations = self.llm_generator.generate_stock_friendly_names(company_name)
-            
-            if not variations:
-                logger.warning(f"LLM generated no variations for '{company_name}'")
-                return None
-            
-            # Try each variation
-            for i, variation in enumerate(variations, 1):
-                logger.info(f"  Trying variation #{i}: '{variation}'")
-                match = self.finnhub.find_best_match(variation)
-                
-                if match:
-                    logger.info(f"  ✓ Success with variation #{i}: '{variation}' → {match['symbol']}")
-                    return match
-                else:
-                    logger.info(f"  ❌ Variation #{i} failed: '{variation}'")
-            
-            logger.warning(f"All {len(variations)} LLM variations failed for '{company_name}'")
-            return None
-            
-        except Exception as e:
-            logger.error(f"LLM fallback failed for '{company_name}': {str(e)}")
-            return None
+
 
 class CSVReader:
     """Robust CSV reader for portfolio data"""

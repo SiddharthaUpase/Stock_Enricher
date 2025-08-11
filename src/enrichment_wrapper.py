@@ -73,7 +73,7 @@ class EnrichmentWrapper:
                         "failed": failed_lookups
                     })
                     
-                    # Try direct lookup first
+                    # Use deterministic lookup algorithm
                     match = self.enricher.finnhub.find_best_match(item.name)
                     
                     if match:
@@ -82,18 +82,8 @@ class EnrichmentWrapper:
                         successful_lookups += 1
                         logger.info(f"Task {task_id}: ✓ Symbol lookup: '{item.name}' → {item.symbol}")
                     else:
-                        # LLM fallback
-                        logger.info(f"Task {task_id}: 🤖 Trying LLM fallback for '{item.name}'")
-                        match = self.enricher._try_llm_fallback(item.name)
-                        
-                        if match:
-                            item.symbol = match['symbol']
-                            item.enriched = True
-                            successful_lookups += 1
-                            logger.info(f"Task {task_id}: ✓ LLM symbol lookup: '{item.name}' → {item.symbol}")
-                        else:
-                            failed_lookups += 1
-                            logger.warning(f"Task {task_id}: ✗ Symbol lookup failed for '{item.name}'")
+                        failed_lookups += 1
+                        logger.warning(f"Task {task_id}: ✗ Symbol lookup failed for '{item.name}'")
                             
                 elif item.needs_name_lookup():
                     # Handle entries with symbol but no name
