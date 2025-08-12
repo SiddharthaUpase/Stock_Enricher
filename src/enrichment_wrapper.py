@@ -57,6 +57,8 @@ class EnrichmentWrapper:
             # Step 2: Enrich both symbols and names with progress tracking
             successful_lookups = 0
             failed_lookups = 0
+            failed_symbol_lookups = []  # Track failed company names
+            failed_name_lookups = []    # Track failed symbols
             
             for i, item in enumerate(portfolio_data):
                 progress_percentage = 10 + (i / total_companies) * 80  # 10% to 90%
@@ -83,6 +85,7 @@ class EnrichmentWrapper:
                         logger.info(f"Task {task_id}: ✓ Symbol lookup: '{item.name}' → {item.symbol}")
                     else:
                         failed_lookups += 1
+                        failed_symbol_lookups.append(item.name)
                         logger.warning(f"Task {task_id}: ✗ Symbol lookup failed for '{item.name}'")
                             
                 elif item.needs_name_lookup():
@@ -107,6 +110,7 @@ class EnrichmentWrapper:
                         logger.info(f"Task {task_id}: ✓ Name lookup: '{item.symbol}' → {item.name}")
                     else:
                         failed_lookups += 1
+                        failed_name_lookups.append(item.symbol)
                         logger.warning(f"Task {task_id}: ✗ Name lookup failed for '{item.symbol}'")
                         
                 else:
@@ -156,10 +160,58 @@ class EnrichmentWrapper:
                 "excluded_entries": len(entries_without_symbols)
             })
             
+            # Print failure analysis at the end
             logger.info(f"Task {task_id}: Enrichment completed successfully")
             logger.info(f"Task {task_id}: Exported {len(entries_with_symbols)} entries, excluded {len(entries_without_symbols)}")
             
-            return csv_string
+            # Print detailed failure analysis
+            if failed_symbol_lookups or failed_name_lookups:
+                logger.info(f"\n{'='*80}")
+                logger.info(f"Task {task_id}: FAILURE ANALYSIS")
+                logger.info(f"{'='*80}")
+                
+                if failed_symbol_lookups:
+                    logger.info(f"\n❌ FAILED SYMBOL LOOKUPS ({len(failed_symbol_lookups)} companies):")
+                    for i, company_name in enumerate(failed_symbol_lookups, 1):
+                        logger.info(f"   {i:2d}. \"{company_name}\"")
+                    
+                    logger.info(f"\n🔍 ANALYSIS OF FAILED SYMBOL LOOKUPS:")
+                    logger.info(f"   - These company names could not be matched to stock symbols")
+                    logger.info(f"   - Possible reasons: Typos, non-public companies, delisted stocks, or API limitations")
+                    logger.info(f"   - Consider manual verification or alternative data sources")
+                
+                if failed_name_lookups:
+                    logger.info(f"\n❌ FAILED NAME LOOKUPS ({len(failed_name_lookups)} symbols):")
+                    for i, symbol in enumerate(failed_name_lookups, 1):
+                        logger.info(f"   {i:2d}. \"{symbol}\"")
+                    
+                    logger.info(f"\n🔍 ANALYSIS OF FAILED NAME LOOKUPS:")
+                    logger.info(f"   - These symbols could not be matched to company names")
+                    logger.info(f"   - Possible reasons: Invalid symbols, delisted stocks, or API limitations")
+                    logger.info(f"   - Consider manual verification or symbol validation")
+                
+                logger.info(f"\n📊 FAILURE STATISTICS:")
+                logger.info(f"   - Total failed lookups: {len(failed_symbol_lookups) + len(failed_name_lookups)}")
+                logger.info(f"   - Failed symbol lookups: {len(failed_symbol_lookups)}")
+                logger.info(f"   - Failed name lookups: {len(failed_name_lookups)}")
+                logger.info(f"   - Success rate: {success_rate:.1f}%")
+                logger.info(f"{'='*80}")
+            else:
+                logger.info(f"\n🎉 Task {task_id}: Perfect success rate - no failed lookups!")
+            
+            # Return both CSV string and enrichment metadata
+            enrichment_metadata = {
+                "total_processed": total_companies,
+                "successful_lookups": successful_lookups,
+                "failed_lookups": failed_lookups,
+                "success_rate": success_rate,
+                "exported_entries": len(entries_with_symbols),
+                "excluded_entries": len(entries_without_symbols),
+                "failed_symbol_lookups": failed_symbol_lookups,
+                "failed_name_lookups": failed_name_lookups
+            }
+            
+            return csv_string, enrichment_metadata
             
         except Exception as e:
             logger.error(f"Task {task_id}: Enrichment failed: {str(e)}")

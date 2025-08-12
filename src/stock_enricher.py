@@ -268,7 +268,7 @@ class FinnhubAPI:
         return converted
     
     def _generate_search_variations(self, finnhub_format: str) -> List[str]:
-        """Generate search variations for better matching"""
+        """Generate enhanced search variations for better matching"""
         variations = []
         
         # 1. Try the exact Finnhub format
@@ -285,9 +285,59 @@ class FinnhubAPI:
                 variations.append(without_suffix)
                 break  # Only remove one suffix
         
-        # 3. Try title case version (mixed case often works better)
-        title_case = ' '.join(word.capitalize() for word in without_suffix.split())
+        # 3. Enhanced word-based strategies
+        words = without_suffix.split()
         
+        if len(words) >= 2:
+            # 3a. First two words (e.g., "ADVANCED MICRO" from "ADVANCED MICRO DEVICES")
+            variations.append(' '.join(words[:2]))
+            
+            # 3b. Last two words
+            if len(words) > 2:
+                variations.append(' '.join(words[-2:]))
+            
+            # 3c. Core business terms (remove middle words for 3+ word companies)
+            if len(words) >= 3:
+                # Try removing each middle word (keep first and last)
+                for i in range(1, len(words) - 1):
+                    words_copy = words.copy()
+                    words_copy.pop(i)
+                    variations.append(' '.join(words_copy))
+                
+                # First and last word only
+                variations.append(f"{words[0]} {words[-1]}")
+        
+        # 4. Common abbreviations and business term patterns
+        abbreviated = without_suffix
+        abbreviation_map = {
+            'INTERNATIONAL': 'INTL',
+            'CORPORATION': 'CORP',
+            'TECHNOLOGIES': 'TECH',
+            'COMMUNICATIONS': 'COMM',
+            'SYSTEMS': 'SYS',
+            'SOLUTIONS': 'SOL',
+            'SERVICES': 'SVC',
+            'HOLDINGS': 'HLDG'
+        }
+        
+        for full_word, abbrev in abbreviation_map.items():
+            if full_word in abbreviated:
+                abbreviated = abbreviated.replace(full_word, abbrev)
+        
+        if abbreviated != without_suffix:
+            variations.append(abbreviated)
+        
+        # 5. Business-specific patterns (based on our debugging discoveries)
+        # Handle "Business Machines" pattern for IBM-like companies
+        if 'BUSINESS' in without_suffix and 'MACHINES' in without_suffix:
+            variations.append('BUSINESS MACHINES')
+        
+        # Handle "Micro Devices" pattern for AMD-like companies  
+        if 'MICRO' in without_suffix and 'DEVICES' in without_suffix:
+            variations.append('MICRO DEVICES')
+        
+        # 6. Try title case version (mixed case often works better)
+        title_case = ' '.join(word.capitalize() for word in without_suffix.split())
         if title_case != without_suffix and title_case != finnhub_format:
             variations.append(title_case)
         
@@ -295,7 +345,7 @@ class FinnhubAPI:
         seen = set()
         unique_variations = []
         for variation in variations:
-            if variation not in seen:
+            if variation and variation not in seen:
                 seen.add(variation)
                 unique_variations.append(variation)
         
@@ -480,7 +530,9 @@ class SymbolEnricher:
             "successful_name_lookups": 0,
             "failed_symbol_lookups": 0,
             "failed_name_lookups": 0,
-            "already_complete": 0
+            "already_complete": 0,
+            "failed_symbol_lookup_names": [],  # Track failed company names
+            "failed_name_lookup_symbols": []   # Track failed symbols
         }
         
         for item in valid_entries:
@@ -498,6 +550,7 @@ class SymbolEnricher:
                     logger.info(f"✓ Symbol lookup: '{item.name}' → {item.symbol}")
                 else:
                     enrichment_stats["failed_symbol_lookups"] += 1
+                    enrichment_stats["failed_symbol_lookup_names"].append(item.name)
                     logger.warning(f"✗ Symbol lookup failed for '{item.name}'")
                         
             elif item.needs_name_lookup():
@@ -514,6 +567,7 @@ class SymbolEnricher:
                     logger.info(f"✓ Name lookup: '{item.symbol}' → {item.name}")
                 else:
                     enrichment_stats["failed_name_lookups"] += 1
+                    enrichment_stats["failed_name_lookup_symbols"].append(item.symbol)
                     logger.warning(f"✗ Name lookup failed for '{item.symbol}'")
                     
             elif item.symbol and item.name:
@@ -529,6 +583,44 @@ class SymbolEnricher:
         logger.info(f"Enrichment completed - Overall success rate: {success_rate:.1f}%")
         logger.info(f"  - Symbol lookups: {enrichment_stats['successful_symbol_lookups']}/{enrichment_stats['attempted_symbol_lookups']}")
         logger.info(f"  - Name lookups: {enrichment_stats['successful_name_lookups']}/{enrichment_stats['attempted_name_lookups']}")
+        
+        # Print detailed failure analysis
+        failed_symbol_names = enrichment_stats["failed_symbol_lookup_names"]
+        failed_name_symbols = enrichment_stats["failed_name_lookup_symbols"]
+        
+        if failed_symbol_names or failed_name_symbols:
+            logger.info(f"\n{'='*80}")
+            logger.info(f"FAILURE ANALYSIS")
+            logger.info(f"{'='*80}")
+            
+            if failed_symbol_names:
+                logger.info(f"\n❌ FAILED SYMBOL LOOKUPS ({len(failed_symbol_names)} companies):")
+                for i, company_name in enumerate(failed_symbol_names, 1):
+                    logger.info(f"   {i:2d}. \"{company_name}\"")
+                
+                logger.info(f"\n🔍 ANALYSIS OF FAILED SYMBOL LOOKUPS:")
+                logger.info(f"   - These company names could not be matched to stock symbols")
+                logger.info(f"   - Possible reasons: Typos, non-public companies, delisted stocks, or API limitations")
+                logger.info(f"   - Consider manual verification or alternative data sources")
+            
+            if failed_name_symbols:
+                logger.info(f"\n❌ FAILED NAME LOOKUPS ({len(failed_name_symbols)} symbols):")
+                for i, symbol in enumerate(failed_name_symbols, 1):
+                    logger.info(f"   {i:2d}. \"{symbol}\"")
+                
+                logger.info(f"\n🔍 ANALYSIS OF FAILED NAME LOOKUPS:")
+                logger.info(f"   - These symbols could not be matched to company names")
+                logger.info(f"   - Possible reasons: Invalid symbols, delisted stocks, or API limitations")
+                logger.info(f"   - Consider manual verification or symbol validation")
+            
+            logger.info(f"\n📊 FAILURE STATISTICS:")
+            logger.info(f"   - Total failed lookups: {len(failed_symbol_names) + len(failed_name_symbols)}")
+            logger.info(f"   - Failed symbol lookups: {len(failed_symbol_names)}")
+            logger.info(f"   - Failed name lookups: {len(failed_name_symbols)}")
+            logger.info(f"   - Success rate: {success_rate:.1f}%")
+            logger.info(f"{'='*80}")
+        else:
+            logger.info(f"\n🎉 Perfect success rate - no failed lookups!")
         
         return valid_entries, enrichment_stats
     

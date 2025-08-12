@@ -103,7 +103,7 @@ def get_task_status(task_id):
         
         task = tasks[task_id]
         
-        return {
+        response = {
             "task_id": task_id,
             "status": task["status"],
             "progress": task["progress"],
@@ -112,9 +112,66 @@ def get_task_status(task_id):
             "error": task.get("error")
         }
         
+        # Add results availability flag
+        if task["status"] == "completed" and task.get("result_file"):
+            response["results_available"] = True
+            response["completed_at"] = task.get("completed_at")
+        else:
+            response["results_available"] = False
+            
+        return response
+        
     except Exception as e:
         logger.error(f"Status check failed for {task_id}: {str(e)}")
         return {"error": f"Status check failed: {str(e)}"}, 500
+
+@app.route('/results/<task_id>', methods=['GET'])
+def get_results(task_id):
+    """Get the enriched results in JSON format for UI display"""
+    try:
+        if task_id not in tasks:
+            return {"error": "Task not found"}, 404
+        
+        task = tasks[task_id]
+        
+        if task["status"] != "completed":
+            return {"error": f"Task not completed. Current status: {task['status']}"}, 400
+        
+        if not task["result_file"]:
+            return {"error": "Result data not available"}, 404
+        
+        # Parse CSV content into JSON for UI display
+        import csv
+        from io import StringIO
+        
+        csv_reader = csv.DictReader(StringIO(task["result_file"]))
+        enriched_data = []
+        
+        for row in csv_reader:
+            enriched_data.append({
+                "name": row.get("Name", ""),
+                "symbol": row.get("Symbol", ""),
+                "price": float(row.get("Price", 0)),
+                "shares": int(row.get("# of Shares", 0)),
+                "market_value": float(row.get("Market Value", 0))
+            })
+        
+        return {
+            "task_id": task_id,
+            "status": "completed",
+            "data": enriched_data,
+            "summary": {
+                "total_entries": len(enriched_data),
+                "total_market_value": sum(item["market_value"] for item in enriched_data),
+                "progress": task["progress"]
+            },
+            "enrichment_summary": task.get("enrichment_summary", {}),
+            "completed_at": task.get("completed_at")
+        }
+        
+    except Exception as e:
+        logger.error(f"Results retrieval failed for {task_id}: {str(e)}")
+        return {"error": f"Results retrieval failed: {str(e)}"}, 500
 
 @app.route('/download/<task_id>', methods=['GET'])
 def download_result(task_id):
@@ -180,18 +237,19 @@ def process_csv_background(task_id: str, file_content: bytes, filename: str):
         
         try:
             # Process the CSV using the enrichment wrapper
-            result_csv = enrichment_wrapper.enrich_csv_with_progress(
+            result_csv, enrichment_metadata = enrichment_wrapper.enrich_csv_with_progress(
                 temp_file_path, 
                 task_id, 
                 progress_callback=update_task_progress
             )
             
-            # Store the result
+            # Store the result with enrichment metadata
             tasks[task_id].update({
                 "status": "completed",
                 "message": "Enrichment completed successfully",
                 "result_file": result_csv,
-                "completed_at": datetime.now().isoformat()
+                "completed_at": datetime.now().isoformat(),
+                "enrichment_summary": enrichment_metadata
             })
             
             logger.info(f"Task {task_id} completed successfully")
@@ -224,6 +282,7 @@ if __name__ == '__main__':
     print("Endpoints:")
     print("  POST /upload        - Upload CSV file")
     print("  GET  /status/<id>   - Check task status") 
+    print("  GET  /results/<id>  - View enriched results (JSON)")
     print("  GET  /download/<id> - Download enriched CSV")
     print("  GET  /health        - Health check")
     print("  GET  /tasks         - List all tasks")
